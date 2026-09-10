@@ -1,5 +1,8 @@
 # Phase 4 — backend deployment (Render)
 
+> **Superseded.** The stack moved off Render + Supabase to **Fly.io + Neon + Nhost**.
+> See `fly-deployment.md` for the current runbook. Kept here as history.
+
 ## What changed
 
 - Root `Dockerfile` — builds an API-only image from `backend/requirements-api.txt`

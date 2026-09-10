@@ -22,21 +22,43 @@ import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 
+const IMAGE_PROVIDER_HINTS: Record<string, string> = {
+  "workers-ai": "Cloudflare Workers AI — free tier, ~7s/image. Needs CF_ACCOUNT_ID + CF_API_TOKEN on the backend.",
+  pollinations: "Keyless, no signup — lower quality. Good fallback.",
+  gemini: "Gemini 2.5 Flash Image — good quality, but NOT free (needs billing on the Google project).",
+  diffusers: "Local Stable Diffusion — requires a GPU and the local-gpu dependencies on the backend.",
+};
+
 export default function SettingsPage() {
   const { data: initial, isLoading } = useQuery({
     queryKey: ["settings"],
     queryFn: getSettings,
   });
-  const { data: modelsData } = useQuery({
-    queryKey: ["ollama-models"],
-    queryFn: getOllamaModels,
-    enabled: initial?.llmProvider === "ollama",
-  });
-
   const [s, setS] = useState<Settings | null>(null);
   useEffect(() => {
     if (initial && !s) setS(initial);
   }, [initial, s]);
+
+  const {
+    data: modelsData,
+    refetch: refetchModels,
+    isFetching: testingConn,
+  } = useQuery({
+    queryKey: ["ollama-models", s?.ollamaUrl],
+    queryFn: () => getOllamaModels(s?.ollamaUrl),
+    enabled: s?.llmProvider === "ollama" && !!s?.ollamaUrl,
+  });
+
+  const testConnection = async () => {
+    const r = await refetchModels();
+    const models = r.data?.models ?? [];
+    if (models.length) {
+      toast.success(`Connected — ${models.length} model${models.length > 1 ? "s" : ""} found`);
+      if (s && !models.includes(s.modelName)) setS({ ...s, modelName: models[0] });
+    } else {
+      toast.error("No models found. Is Ollama running and reachable from the server?");
+    }
+  };
 
   const mut = useMutation({
     mutationFn: (payload: Settings) => saveSettings(payload),
@@ -80,25 +102,60 @@ export default function SettingsPage() {
 
       <Card className="p-6 space-y-4 shadow-card">
         <h2 className="font-semibold text-lg">Language Model</h2>
+        <p className="text-xs text-muted-foreground">
+          Drives page summaries, illustration prompts, and character extraction. Image
+          generation is separate and always uses the hosted provider.
+        </p>
         <div className="grid gap-2">
           <Label>Active provider</Label>
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center rounded-full border border-border bg-muted px-2.5 py-1 font-mono text-xs uppercase tracking-wide text-foreground">
-              {s.llmProvider}
-            </span>
-            <span className="text-sm text-muted-foreground">{s.llmModel}</span>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Set via the <code>LLM_PROVIDER</code> environment variable on the backend — not
-            editable here.
-          </p>
+          <Select
+            value={s.llmProvider}
+            onValueChange={(v) => update("llmProvider", v)}
+          >
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {(["ollama", "groq", "gemini"] as const).map((p) => (
+                <SelectItem key={p} value={p}>{p}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {s.llmProvider !== "ollama" && (
+            <p className="text-xs text-muted-foreground">
+              Model{" "}
+              <span className="font-mono">
+                {s.llmProvider === "groq" ? s.groqModel : s.geminiModel}
+              </span>{" "}
+              — set by the <code>{s.llmProvider.toUpperCase()}_MODEL</code> env var on the
+              backend.
+            </p>
+          )}
         </div>
 
         {s.llmProvider === "ollama" && (
           <>
             <div className="grid gap-2">
               <Label>Ollama URL</Label>
-              <Input value={s.ollamaUrl} readOnly className="bg-muted" />
+              <div className="flex gap-2">
+                <Input
+                  value={s.ollamaUrl}
+                  placeholder="http://localhost:11434"
+                  onChange={(e) => update("ollamaUrl", e.target.value)}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={testingConn || !s.ollamaUrl}
+                  onClick={testConnection}
+                >
+                  {testingConn ? <Loader2 className="size-4 animate-spin" /> : "Test"}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Must be reachable <strong>from the server</strong>. Local runs can use{" "}
+                <code>localhost:11434</code>; against the hosted backend, expose your Ollama
+                with a tunnel (ngrok / cloudflared) and paste that URL. This is a single
+                shared setting for the whole site.
+              </p>
             </div>
             <div className="grid gap-2">
               <Label>LLM Model</Label>
@@ -107,13 +164,20 @@ export default function SettingsPage() {
                   <SelectValue placeholder="Select model" />
                 </SelectTrigger>
                 <SelectContent>
-                  {(modelsData?.models ?? [s.modelName]).filter(Boolean).map((m) => (
+                  {Array.from(
+                    new Set([...(modelsData?.models ?? []), s.modelName].filter(Boolean)),
+                  ).map((m) => (
                     <SelectItem key={m} value={m}>
                       {m}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {!modelsData?.models?.length && (
+                <p className="text-xs text-muted-foreground">
+                  Hit <strong>Test</strong> to load the models on that instance.
+                </p>
+              )}
             </div>
             <div className="grid gap-2">
               <Label>Timeout (sec)</Label>
@@ -128,13 +192,26 @@ export default function SettingsPage() {
       </Card>
 
       <Card className="p-6 space-y-4 shadow-card">
-        <div>
+        <div className="space-y-2">
           <h2 className="font-semibold text-lg">Image Generation</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            Active provider:{" "}
-            <span className="font-mono uppercase tracking-wide">{s.imageProvider}</span>
-            {!supportsModelAndGuidance && " — model and guidance are fixed by this provider and not configurable here."}
-          </p>
+          <Label>Active provider</Label>
+          <Select
+            value={s.imageProvider}
+            onValueChange={(v) => update("imageProvider", v)}
+          >
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {(["workers-ai", "pollinations", "gemini", "diffusers"] as const).map((p) => (
+                <SelectItem key={p} value={p}>{p}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">{IMAGE_PROVIDER_HINTS[s.imageProvider] ?? ""}</p>
+          {!supportsModelAndGuidance && (
+            <p className="text-xs text-muted-foreground">
+              Model and guidance are fixed by this provider and not configurable here.
+            </p>
+          )}
         </div>
         <div className="grid sm:grid-cols-2 gap-4">
           <div className="grid gap-2">

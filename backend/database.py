@@ -22,12 +22,22 @@ if not DATABASE_URL:
         "with a valid PostgreSQL connection string."
     )
 
-# Managed Postgres providers (Supabase/Neon/RDS) rarely grant permission to
-# connect to the 'postgres' admin database or run CREATE DATABASE. Skip that
-# step there and rely on the target database already existing.
+# Managed Postgres providers (Neon/RDS/etc.) rarely grant permission to connect
+# to the 'postgres' admin database or run CREATE DATABASE. Skip that step there
+# (SKIP_DB_AUTOCREATE=true) and rely on the target database already existing.
 SKIP_DB_AUTOCREATE = os.getenv("SKIP_DB_AUTOCREATE", "false").lower() == "true"
 
-engine = create_engine(DATABASE_URL)
+# pool_pre_ping: Neon (and any serverless/managed PG) drops idle connections;
+# without this the first query after an idle spell throws. pool_recycle keeps
+# connections younger than Neon's idle timeout. Small pool - the worker thread
+# and request handlers share this engine against a free-tier instance.
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    pool_size=5,
+    max_overflow=5,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

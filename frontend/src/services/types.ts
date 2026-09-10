@@ -67,6 +67,8 @@ export interface Character {
 export interface Settings {
   llmProvider: string;
   llmModel: string;
+  groqModel: string;
+  geminiModel: string;
   imageProvider: string;
   ollamaUrl: string;
   modelName: string;

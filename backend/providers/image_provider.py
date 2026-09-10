@@ -1,6 +1,7 @@
 """
 Image provider abstraction. Swap between local Diffusers inference and a
-cloud free-tier provider (Pollinations) via the IMAGE_PROVIDER env var.
+cloud provider (pollinations, workers-ai, gemini) via the IMAGE_PROVIDER env
+var, without touching call sites.
 """
 
 import os
@@ -189,13 +190,76 @@ class CloudflareWorkersAIProvider(ImageProvider):
             return None
 
 
+class GeminiImageProvider(ImageProvider):
+    """Cloud image generation via the Gemini API (gemini-2.5-flash-image).
+
+    NOT free: the image model has a free-tier quota of 0 (unlike the Gemini
+    text models). The GEMINI_API_KEY's Google Cloud project needs billing
+    enabled for this to work; then it's cheap, not free.
+
+    Reuses GEMINI_API_KEY. No seed or size controls - output is resized to the
+    configured dimensions. Negative prompts aren't a first-class parameter, so
+    the negative is folded into the text prompt.
+
+    Character consistency: Gemini can accept reference images, which would let
+    it match a character to earlier pages. Wiring that needs _run_image_pipeline
+    to pass the previous page's illustration bytes through render() - a follow-up.
+    """
+
+    def render(self, prompt: str, negative_prompt: str, book_id: int, page_num: int, seed: int) -> Optional[str]:
+        import httpx
+        import base64
+        from io import BytesIO
+        from PIL import Image
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+        if not api_key:
+            logger.warning("GEMINI_API_KEY not set; skipping image generation.")
+            return None
+
+        config = _resolve_generation_config()
+        text = f"{prompt}\n\nAvoid: {negative_prompt}" if negative_prompt else prompt
+
+        try:
+            response = httpx.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": api_key},
+                json={
+                    "contents": [{"parts": [{"text": text}]}],
+                    "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+                },
+                timeout=float(os.getenv("GEMINI_IMAGE_TIMEOUT_SECONDS", "90.0")),
+            )
+            response.raise_for_status()
+            data = response.json()
+            parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+            b64 = next((p["inlineData"]["data"] for p in parts if p.get("inlineData")), None)
+            if not b64:
+                logger.error(f"No image in Gemini response: {data}")
+                return None
+
+            image = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+            image = image.resize((config["width"], config["height"]))
+            return _save(image, book_id, page_num)
+        except Exception as e:
+            logger.error(f"Gemini image generation failed: {e}")
+            return None
+
+
 _providers = {
     "diffusers": DiffusersProvider,
     "pollinations": PollinationsProvider,
     "workers-ai": CloudflareWorkersAIProvider,
+    "gemini": GeminiImageProvider,
 }
 
 _instance_cache = {}
+
+
+def list_image_providers() -> list[str]:
+    """Registered IMAGE_PROVIDER names, for the Settings dropdown / validation."""
+    return list(_providers)
 
 
 def get_image_provider() -> ImageProvider:

@@ -4,6 +4,8 @@ import type { Settings } from "./types";
 type BackendSettings = {
   llm_provider: string;
   llm_model: string;
+  groq_model: string;
+  gemini_model: string;
   image_provider: string;
   ollama_url: string;
   model_name: string;
@@ -21,6 +23,8 @@ function toFrontendSettings(b: BackendSettings): Settings {
   return {
     llmProvider: b.llm_provider,
     llmModel: b.llm_model,
+    groqModel: b.groq_model,
+    geminiModel: b.gemini_model,
     imageProvider: b.image_provider,
     ollamaUrl: b.ollama_url,
     modelName: b.model_name,
@@ -37,6 +41,8 @@ function toFrontendSettings(b: BackendSettings): Settings {
 
 function toBackendSettings(s: Settings) {
   return {
+    llm_provider: s.llmProvider,
+    image_provider: s.imageProvider,
     ollama_url: s.ollamaUrl,
     model_name: s.modelName,
     timeout: s.timeout,
@@ -55,8 +61,13 @@ export async function getSettings(): Promise<Settings> {
   return toFrontendSettings(data);
 }
 
-export async function getOllamaModels(): Promise<{ models: string[] }> {
-  const { data } = await apiClient.get<{ models: string[] }>("/settings/ollama-models");
+export async function getOllamaModels(
+  url?: string,
+): Promise<{ models: string[]; reachable?: boolean; url?: string }> {
+  const { data } = await apiClient.get<{ models: string[]; reachable?: boolean; url?: string }>(
+    "/settings/ollama-models",
+    { params: url ? { url } : undefined },
+  );
   return data;
 }
 

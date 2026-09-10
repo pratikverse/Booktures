@@ -53,6 +53,10 @@ def _storage_key_from_path(path: str | None) -> str | None:
     if not path:
         return None
     normalized = path.replace("\\", "/")
+    # Nhost records the full download URL (.../v1/files/<uuid>); the provider
+    # recovers the file id from the last segment, so hand it through as-is.
+    if "/v1/files/" in normalized:
+        return normalized
     for marker in ("/pdfs/", "/illustrations/"):
         idx = normalized.find(marker)
         if idx != -1:
@@ -292,19 +296,25 @@ def manage_job(job_id: int, action: str = Body(..., embed=True), db: Session = D
 def get_settings():
     """Get current AI configuration."""
     llm_provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
-    llm_model = {
-        "groq": os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
-        "gemini": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-    }.get(llm_provider, pdf_service.OLLAMA_DEFAULT_MODEL)
+    # Read live from the environment (Settings writes here) rather than the
+    # module constants, which are frozen at import.
+    ollama_url = os.getenv("OLLAMA_BASE_URL", pdf_service.OLLAMA_BASE_URL)
+    ollama_model = os.getenv("OLLAMA_DEFAULT_MODEL", pdf_service.OLLAMA_DEFAULT_MODEL)
+    ollama_timeout = os.getenv("OLLAMA_TIMEOUT_SECONDS", str(pdf_service.OLLAMA_TIMEOUT_SECONDS))
+    groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    llm_model = {"groq": groq_model, "gemini": gemini_model}.get(llm_provider, ollama_model)
 
     # Return flat structure expected by frontend lib/api.ts
     return {
         "llm_provider": llm_provider,
         "llm_model": llm_model,
+        "groq_model": groq_model,
+        "gemini_model": gemini_model,
         "image_provider": os.getenv("IMAGE_PROVIDER", "diffusers").strip().lower(),
-        "ollama_url": pdf_service.OLLAMA_BASE_URL,
-        "model_name": pdf_service.OLLAMA_DEFAULT_MODEL,
-        "timeout": int(pdf_service.OLLAMA_TIMEOUT_SECONDS),
+        "ollama_url": ollama_url,
+        "model_name": ollama_model,
+        "timeout": int(float(ollama_timeout)),
         "image_mode": os.getenv("IMAGE_PRESET", "balanced"),
         "image_model": os.getenv("DIFFUSION_MODEL", "segmind/SSD-1B"),
         "image_width": int(os.getenv("IMAGE_WIDTH", "768")),
@@ -315,15 +325,36 @@ def get_settings():
     }
 
 @router.get("/settings/ollama-models")
-def get_ollama_models_standalone():
-    """Standalone endpoint for fetching available models."""
-    return {"models": settings_service.get_available_ollama_models(pdf_service.OLLAMA_BASE_URL)}
+def get_ollama_models_standalone(url: str | None = None):
+    """List models on an Ollama instance. `url` probes a specific instance (used
+    by the Settings 'Test connection' button before saving); otherwise the
+    configured OLLAMA_BASE_URL."""
+    target = url or os.getenv("OLLAMA_BASE_URL", pdf_service.OLLAMA_BASE_URL)
+    if url and not _valid_ollama_url(url):
+        raise HTTPException(status_code=400, detail="URL must be a plain http(s) URL with a host.")
+    models_list = settings_service.get_available_ollama_models(target)
+    return {"models": models_list, "reachable": bool(models_list), "url": target}
+
+
+_ALLOWED_LLM_PROVIDERS = {"ollama", "groq", "gemini"}
+
+
+def _valid_ollama_url(url: str) -> bool:
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url.strip())
+    except ValueError:
+        return False
+    return p.scheme in ("http", "https") and bool(p.hostname)
+
 
 @router.put("/settings")
 def update_settings(config: dict = Body(...)):
-    """Update AI configuration (persisted to .env)."""
+    """Update AI configuration (persisted to the DB-backed settings table)."""
     # Map frontend keys to backend environment variables
     mappings = {
+        "llm_provider": "LLM_PROVIDER",
+        "image_provider": "IMAGE_PROVIDER",
         "ollama_url": "OLLAMA_BASE_URL",
         "model_name": "OLLAMA_DEFAULT_MODEL",
         "timeout": "OLLAMA_TIMEOUT_SECONDS",
@@ -335,6 +366,22 @@ def update_settings(config: dict = Body(...)):
         "image_guidance": "IMAGE_GUIDANCE",
         "imageStyle": "IMAGE_STYLE" # Support camelCase from Shadcn Settings.tsx
     }
+
+    if "llm_provider" in config:
+        prov = str(config["llm_provider"]).strip().lower()
+        if prov not in _ALLOWED_LLM_PROVIDERS:
+            raise HTTPException(status_code=400, detail=f"llm_provider must be one of {sorted(_ALLOWED_LLM_PROVIDERS)}.")
+        config["llm_provider"] = prov
+
+    if "image_provider" in config:
+        from providers.image_provider import list_image_providers
+        iprov = str(config["image_provider"]).strip().lower()
+        if iprov not in list_image_providers():
+            raise HTTPException(status_code=400, detail=f"image_provider must be one of {sorted(list_image_providers())}.")
+        config["image_provider"] = iprov
+
+    if config.get("ollama_url") and not _valid_ollama_url(str(config["ollama_url"])):
+        raise HTTPException(status_code=400, detail="ollama_url must be a plain http(s) URL with a host.")
 
     for frontend_key, env_key in mappings.items():
         if frontend_key in config:

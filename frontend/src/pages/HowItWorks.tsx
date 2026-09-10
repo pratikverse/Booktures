@@ -3,7 +3,7 @@ import { Reveal } from "@/lib/reveal";
 const STAGES = [
   {
     title: "Text extraction",
-    model: "pdfplumber + Tesseract OCR",
+    model: "PyMuPDF + Tesseract OCR",
     body: "Each page is read directly from the PDF's text layer where one exists, falling back to OCR for scanned or image-only pages. Output is split into page-level chunks that downstream stages work from.",
   },
   {
@@ -23,8 +23,8 @@ const STAGES = [
   },
   {
     title: "Storage & delivery",
-    model: "local disk / Supabase",
-    body: "Source PDFs and generated illustrations are served straight back to the reader — from local disk in dev, or a Supabase storage bucket once deployed.",
+    model: "local disk / Nhost Storage",
+    body: "Source PDFs and generated illustrations are served straight back to the reader — from local disk in dev, or an Nhost storage bucket once deployed.",
   },
 ];
 
@@ -32,7 +32,7 @@ const COMPONENTS = [
   ["Provider abstraction", "LLM and image backends are swappable via env vars — no code changes to move from a local Ollama box to Groq or Gemini."],
   ["Union-find aliasing", "Character name variants merge order-independently, instead of a first-match-wins string comparison."],
   ["JSON-structured prompts", "Character and scene extraction ask the LLM for JSON directly, with a retry on malformed output, instead of parsing free-text headings."],
-  ["Supabase", "Managed Postgres + object storage on a free tier, reached over the IPv4-compatible session pooler."],
+  ["Neon + Nhost", "Serverless Postgres (Neon) and managed object storage (Nhost) — both free tier, both reached over plain HTTPS from the backend."],
 ];
 
 const LIMITS = [

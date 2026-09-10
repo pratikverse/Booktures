@@ -1,0 +1,59 @@
+# Fly.io deployment for the Booktures backend (FastAPI + in-process job worker).
+# Build uses the root Dockerfile (API-only image, runs `alembic upgrade head`
+# then uvicorn). See docs/fly-deployment.md for the full runbook.
+
+app = "booktures"
+primary_region = "bom"  # Mumbai - co-located with Nhost storage (ap-south-1)
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Non-secret config. Secrets (DATABASE_URL, APP_API_KEY, provider API keys,
+# NHOST_ADMIN_SECRET) are set with `fly secrets set` - never put them here.
+[env]
+  SKIP_DB_AUTOCREATE = "true"        # Neon: the app can't CREATE DATABASE
+  MAX_UPLOAD_MB = "25"
+
+  STORAGE_PROVIDER = "nhost"
+  NHOST_STORAGE_URL = "https://jhowkmqddbkqwgwbjrek.storage.ap-south-1.nhost.run/v1"
+  NHOST_BUCKET = "default"
+
+  # Set these to match what you run on Render today (groq/gemini, workers-ai/pollinations).
+  LLM_PROVIDER = "groq"
+  GROQ_MODEL = "openai/gpt-oss-20b"   # Groq retired the Llama 3.x hosted models
+  IMAGE_PROVIDER = "workers-ai"
+  IMAGE_PRESET = "balanced"
+  CF_WORKERS_AI_MODEL = "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+
+  # Character extraction: LLM single-pass (no spaCy), whole-book pass via Gemini's
+  # large context. Needs GEMINI_API_KEY in secrets; falls back to LLM_PROVIDER.
+  CHARACTER_EXTRACTION_MODE = "llm"
+  CHARACTER_LLM_PROVIDER = "gemini"
+
+  # Keep OCR cheap on the 512mb instance.
+  OCR_DPI = "200"
+  OCR_REPAIR_MAX_CALLS = "40"
+
+  # Replace with the real frontend origin once it's hosted.
+  CORS_ORIGINS = "https://booktures.vercel.app"
+
+[http_service]
+  internal_port = 7860               # matches ENV PORT in the Dockerfile
+  force_https = true
+  # The job worker is an in-process thread - the machine must stay up, so no
+  # auto-stop and never more than one instance (a second worker would
+  # double-process jobs and the orphan-reset on boot would fight it).
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"                    # 256mb OOMs with spaCy + pdfplumber loaded

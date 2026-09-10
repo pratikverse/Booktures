@@ -16,18 +16,18 @@ psycopg2-binary==2.9.11
 alembic==1.14.0
 
 httpx==0.28.1
-requests==2.32.5
 
 pdfplumber==0.11.9
 pdfminer.six==20251230
-pypdfium2==5.6.0
+PyMuPDF==1.25.5
 pytesseract==0.3.13
 pillow==12.1.1
 
 rapidfuzz==3.14.3
 
-# Character NER (CPU-only small model; character_service.py currently requires this
-# even in the cloud profile — planned for replacement by an LLM-based extractor in Phase 1)
+# Character NER. CHARACTER_EXTRACTION_MODE=llm (the hosted default) doesn't use
+# this, but character_service.py still imports spacy at module load, so both are
+# required. Drop them only once that import is made lazy.
 spacy==3.8.11
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
 

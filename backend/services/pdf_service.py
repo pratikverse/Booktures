@@ -37,6 +37,18 @@ OLLAMA_FAST_MODEL = os.getenv("OLLAMA_FAST_MODEL", "phi3")
 OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180.0"))
 OLLAMA_ENABLED = os.getenv("OLLAMA_ENABLED", "True").lower() == "true"
 
+
+def _llm_enabled(provider: str | None = None) -> bool:
+    """Whether LLM-backed enrichment (summaries, OCR repair, classification,
+    character traits) should run.
+
+    OLLAMA_ENABLED only gates *Ollama* - a cloud provider (Groq/Gemini) is
+    independent of it. So enrichment is on when a cloud provider is selected,
+    or when Ollama is explicitly enabled.
+    """
+    effective = (provider or os.getenv("LLM_PROVIDER", "ollama")).strip().lower()
+    return effective != "ollama" or OLLAMA_ENABLED
+
 # ---------------------------------------------------------------------------
 # Regex Patterns for Identifying Metadata and Noise
 # ---------------------------------------------------------------------------
@@ -63,8 +75,17 @@ OCR_MIN_TOKEN_THRESHOLD = 30
 # ---------------------------------------------------------------------------
 # OCR Engine Configuration
 # ---------------------------------------------------------------------------
-OCR_RENDER_RESOLUTION = 300
+# 200 DPI is enough for Tesseract on body text and roughly halves the bitmap
+# memory vs 300 - matters on a 512MB cloud instance. Override with OCR_DPI.
+OCR_RENDER_RESOLUTION = int(os.getenv("OCR_DPI", "200"))
 OCR_TESSERACT_CONFIG = "--oem 3 --psm 6"
+
+# Cap the LLM OCR-repair work so a long scanned book can't exhaust a cloud
+# provider's rate limit: at most N chunks repaired per page, and a process-wide
+# budget across the whole run. Both overridable via env.
+OCR_REPAIR_MAX_CHUNKS_PER_PAGE = int(os.getenv("OCR_REPAIR_MAX_CHUNKS_PER_PAGE", "3"))
+OCR_REPAIR_MAX_CALLS = int(os.getenv("OCR_REPAIR_MAX_CALLS", "40"))
+_ocr_repair_calls = 0
 LIGATURE_REPLACEMENTS = {
     "\ufb00": "ff",
     "\ufb01": "fi",
@@ -102,25 +123,35 @@ _OCR_REPAIR_SYSTEM_PROMPT = (
 # Ollama Client
 # ===========================================================================
 
-def ollama_generate(prompt: str, model: str = None, system: str = "") -> str:
+def ollama_generate(prompt: str, model: str = None, system: str = "", provider: str = None) -> str:
     """
-    Calls the Ollama /api/generate endpoint synchronously.
+    Runs a single LLM completion through the configured provider (Ollama, Groq,
+    or Gemini). Named for historical reasons - it is not Ollama-specific.
 
     Args:
-        prompt: The user prompt to send.
-        model:  Ollama model tag to use (e.g. "mistral", "phi3", "llama3.1:8b").
-        system: Optional system prompt to set model behaviour.
+        prompt:   The user prompt to send.
+        model:    Ollama model tag (e.g. "phi3", "qwen2.5:7b"). Ignored for
+                  non-Ollama providers, which use their own configured default.
+        system:   Optional system prompt to set model behaviour.
+        provider: Force a specific provider ("gemini", "groq", "ollama")
+                  regardless of LLM_PROVIDER. Used by character extraction to
+                  reach Gemini's large context window.
 
     Returns:
         The model's response string, or "" on any failure.
     """
-    if not OLLAMA_ENABLED:
+    effective = (provider or os.getenv("LLM_PROVIDER", "ollama")).strip().lower()
+    if not _llm_enabled(effective):
         return ""
-    # Model tags like "phi3"/"qwen2.5:7b" are Ollama-specific; other providers
-    # should fall back to their own configured default instead of 404ing.
-    if os.getenv("LLM_PROVIDER", "ollama").strip().lower() != "ollama":
+    if effective == "ollama":
+        # Honour a model chosen live in Settings over the caller's frozen
+        # module-constant hint; fall back to that hint, then a sane default.
+        model = os.getenv("OLLAMA_DEFAULT_MODEL") or model or "qwen2.5:7b"
+    else:
+        # Model tags like "phi3"/"qwen2.5:7b" are Ollama-specific; other
+        # providers fall back to their own configured default instead of 404ing.
         model = None
-    return get_llm_provider().generate(prompt, system=system, model=model)
+    return get_llm_provider(provider).generate(prompt, system=system, model=model)
 
 
 def _safe_parse_json(raw: str, fallback: dict) -> dict:
@@ -143,7 +174,7 @@ def _safe_parse_json(raw: str, fallback: dict) -> dict:
 def save_pdf(file_bytes: bytes, filename: str) -> str:
     """
     Saves a PDF via the configured storage provider (local disk by default,
-    Supabase/R2 in deployments with an ephemeral filesystem - same
+    Nhost/R2 in deployments with an ephemeral filesystem - same
     abstraction illustrations already use, so uploaded PDFs survive a
     backend restart instead of 404ing once local disk gets wiped).
 
@@ -152,7 +183,7 @@ def save_pdf(file_bytes: bytes, filename: str) -> str:
         filename:   The original name of the file.
 
     Returns:
-        A relative path (local storage) or absolute URL (Supabase/R2)
+        A relative path (local storage) or absolute URL (Nhost/R2)
         identifying the saved file.
     """
     from providers.storage_provider import get_storage_provider
@@ -188,37 +219,43 @@ def extract_text_by_page(pdf_path: str) -> list[dict]:
     pages: list[dict] = []
     header_counts: Counter = Counter()
     footer_counts: Counter = Counter()
-    pypdf_pages: list[Any] = []
 
     # book.file_path is a remote URL when STORAGE_PROVIDER isn't local (e.g.
-    # Supabase) - pdfplumber/pypdf need actual bytes, so fetch once and hand
-    # both readers a fresh BytesIO (streams can't be read twice).
+    # Nhost) - pdfplumber and PyMuPDF need actual bytes, so fetch once and hand
+    # pdfplumber a fresh BytesIO (the stream can't be read twice).
     if pdf_path.startswith("http://") or pdf_path.startswith("https://"):
         from io import BytesIO
         response = httpx.get(pdf_path, timeout=60.0)
         response.raise_for_status()
         pdf_source_bytes = response.content
-        pypdf_source: Any = BytesIO(pdf_source_bytes)
         plumber_source: Any = BytesIO(pdf_source_bytes)
     else:
-        pypdf_source = pdf_path
         plumber_source = pdf_path
 
-    # Attempt to load with pypdf to provide an alternative extraction source
+    # PyMuPDF (fitz): fastest and usually the cleanest digital extraction. Used
+    # as an extra candidate alongside pdfplumber, still subject to the same
+    # quality scoring so a bad page can't win by default.
+    pymupdf_texts: list[str] = []
     try:
-        from pypdf import PdfReader  # type: ignore
-        reader = PdfReader(pypdf_source)
-        pypdf_pages = list(reader.pages)
+        import fitz  # PyMuPDF
+        if pdf_path.startswith("http://") or pdf_path.startswith("https://"):
+            fitz_doc = fitz.open(stream=pdf_source_bytes, filetype="pdf")
+        else:
+            fitz_doc = fitz.open(pdf_path)
+        try:
+            pymupdf_texts = [page.get_text("text") or "" for page in fitz_doc]
+        finally:
+            fitz_doc.close()
     except Exception as exc:
-        logger.debug("pypdf unavailable for %s: %s", pdf_path, exc)
+        logger.debug("PyMuPDF unavailable for %s: %s", pdf_path, exc)
 
     # ------------------------------------------------------------------
     # Phase 1: Initial extraction and header/footer candidate collection
     # ------------------------------------------------------------------
     with pdfplumber.open(plumber_source) as pdf:
         for i, page in enumerate(pdf.pages):
-            pypdf_page = pypdf_pages[i] if i < len(pypdf_pages) else None
-            raw_text, extraction_meta = _extract_page_text(page, pypdf_page=pypdf_page)
+            pymupdf_text = pymupdf_texts[i] if i < len(pymupdf_texts) else None
+            raw_text, extraction_meta = _extract_page_text(page, pymupdf_text=pymupdf_text)
             # Break text into lines to identify repeating structural elements
             lines = _split_lines(raw_text)
 
@@ -287,7 +324,7 @@ def extract_text_by_page(pdf_path: str) -> list[dict]:
 # Page-Level Extraction
 # ===========================================================================
 
-def _extract_page_text(page, pypdf_page=None) -> tuple[str, dict]:
+def _extract_page_text(page, pymupdf_text=None) -> tuple[str, dict]:
     """
     Evaluates multiple extraction methods for a single page and chooses the
     best result.  Triggers OCR if digital extraction is poor, and then runs
@@ -295,23 +332,19 @@ def _extract_page_text(page, pypdf_page=None) -> tuple[str, dict]:
     """
     candidates: list[tuple[str, str]] = []
 
-    # Method 1: Extraction with layout preservation
+    # Method 0: PyMuPDF (fitz) - fastest, usually cleanest
+    if pymupdf_text:
+        candidates.append(("pymupdf", pymupdf_text))
+
+    # Method 1: pdfplumber with layout preservation
     plumber_layout = page.extract_text(layout=True, x_tolerance=1, y_tolerance=1)
     if plumber_layout:
         candidates.append(("plumber_layout", plumber_layout))
 
-    # Method 2: Standard plain text extraction
+    # Method 2: pdfplumber plain text
     plumber_plain = page.extract_text(x_tolerance=1, y_tolerance=1)
     if plumber_plain:
         candidates.append(("plumber_plain", plumber_plain))
-
-    if pypdf_page is not None:
-        try:
-            pypdf_text = pypdf_page.extract_text() or ""
-            if pypdf_text:
-                candidates.append(("pypdf", pypdf_text))
-        except Exception as exc:
-            logger.debug("pypdf extraction failed for page: %s", exc)
 
     # Final fallback for digital extraction: extract individual words
     if not candidates:
@@ -445,16 +478,26 @@ def _repair_ocr_text(text: str) -> str:
     Returns:
         Repaired text string, or the original if repair failed / was skipped.
     """
-    if not OLLAMA_ENABLED or not text or len(text) < 50:
+    global _ocr_repair_calls
+
+    if not _llm_enabled() or not text or len(text) < 50:
         return text
 
     # Break page text into chunks to prevent hitting LLM context limits
     chunks = _chunk_text_for_llm(text, max_chars=1200)
     repaired_chunks: list[str] = []
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
+        over_page_cap = i >= OCR_REPAIR_MAX_CHUNKS_PER_PAGE
+        over_run_budget = _ocr_repair_calls >= OCR_REPAIR_MAX_CALLS
+        if over_page_cap or over_run_budget:
+            # Leave the remaining chunks as raw OCR rather than spending more
+            # (rate-limited) LLM calls on a single book.
+            repaired_chunks.append(chunk)
+            continue
         prompt = f"Repair this OCR-extracted text:\n\n{chunk}"
         result = ollama_generate(prompt, model=OLLAMA_DEFAULT_MODEL, system=_OCR_REPAIR_SYSTEM_PROMPT)
+        _ocr_repair_calls += 1
         repaired_chunks.append(result if result else chunk)
 
     return " ".join(repaired_chunks)
@@ -477,7 +520,7 @@ def _is_weak_page_text_llm(text: str, heuristic_weak: bool) -> bool:
     Returns:
         True if the page text is considered low quality, False otherwise.
     """
-    if not OLLAMA_ENABLED:
+    if not _llm_enabled():
         return heuristic_weak
 
     # Heuristic is confident the text is fine — no need to call LLM
@@ -515,7 +558,7 @@ def _is_likely_running_header_footer_llm(line: str) -> bool:
     Returns:
         True if the line appears to be structural noise (header/footer/page number).
     """
-    if not OLLAMA_ENABLED:
+    if not _llm_enabled():
         return _is_likely_running_header_footer(line)
 
     # Fast-path: let obvious cases bypass the LLM

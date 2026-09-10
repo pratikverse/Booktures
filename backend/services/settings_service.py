@@ -63,7 +63,3 @@ def get_available_ollama_models(base_url: str | None = None):
         return models
     except Exception:
         return []
-
-def get_mode_presets(mode: str):
-    presets = {"fast": {"steps": 15}, "quality": {"steps": 50}}
-    return presets.get(mode, presets["fast"])
