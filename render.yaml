@@ -1,0 +1,71 @@
+# Render Blueprint for the Booktures backend (FastAPI + in-process job worker).
+# Builds the root Dockerfile (API-only image: no torch/diffusers, cloud
+# providers only). Render injects PORT at runtime; the Dockerfile CMD binds to it.
+#
+# Setup: Render dashboard -> New -> Blueprint -> connect pratikverse/Booktures.
+# Then fill the `sync: false` vars (secrets) in the service's Environment tab.
+#
+# Free tier note: the service sleeps after 15 min with no inbound request and
+# cold-starts in ~30-60s. A job running when it sleeps is requeued and restarted
+# on the next wake (_reset_orphaned_jobs on boot). Keep the app tab open while a
+# book generates - the Jobs page polling keeps the service awake.
+
+services:
+  - type: web
+    name: booktures
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    branch: main
+    healthCheckPath: /health
+    envVars:
+      # --- secrets: set these in the dashboard, not here ---
+      - key: DATABASE_URL          # Neon pooled connection string
+        sync: false
+      - key: APP_API_KEY           # must equal the frontend's VITE_API_KEY
+        sync: false
+      - key: NHOST_ADMIN_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CF_ACCOUNT_ID
+        sync: false
+      - key: CF_API_TOKEN
+        sync: false
+      - key: CORS_ORIGINS         # the deployed frontend origin(s), comma-separated
+        sync: false
+
+      # --- non-secret config ---
+      - key: SKIP_DB_AUTOCREATE
+        value: "true"
+      - key: MAX_UPLOAD_MB
+        value: "25"
+      - key: STORAGE_PROVIDER
+        value: nhost
+      - key: NHOST_STORAGE_URL
+        value: https://jhowkmqddbkqwgwbjrek.storage.ap-south-1.nhost.run/v1
+      - key: NHOST_BUCKET
+        value: default
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: CHARACTER_EXTRACTION_MODE
+        value: llm
+      - key: CHARACTER_LLM_PROVIDER
+        value: gemini
+      - key: IMAGE_PROVIDER
+        value: workers-ai
+      - key: IMAGE_PRESET
+        value: balanced
+      - key: CF_WORKERS_AI_MODEL
+        value: "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+      - key: OCR_DPI
+        value: "200"
+      - key: OCR_REPAIR_MAX_CALLS
+        value: "40"

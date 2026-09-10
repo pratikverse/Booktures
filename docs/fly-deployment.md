@@ -1,5 +1,11 @@
 # Backend deployment — Fly.io + Neon + Nhost
 
+> **Note:** Fly.io now requires a verified payment method (and charges an $8
+> "high-risk" deposit on fresh accounts) before you can create an app. If you
+> don't want to pay that, deploy the same image to **Render** instead using
+> `render.yaml` at the repo root — see `render-deployment.md`. Neon + Nhost +
+> all the env vars are identical; only the compute host changes.
+
 Supersedes `phase-4-deployment.md` (Render). Stack:
 
 | Concern | Before | Now |
