@@ -75,8 +75,12 @@ services:
     name: booktures-web
     runtime: static
     branch: main
-    buildCommand: cd frontend && npm ci && npm run build
-    staticPublishPath: frontend/dist
+    # rootDir scopes the build to frontend/ only. Without it Render sees the
+    # repo-root requirements.txt, runs a Python build (torch + GPU stack) and
+    # fails before npm ever runs.
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
     # SPA: every path serves index.html so React Router handles routing client-side.
     routes:
       - type: rewrite
