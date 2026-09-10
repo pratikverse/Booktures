@@ -1,8 +1,8 @@
-# Backend deployment — Render (free tier)
+# Deployment — Render (free tier)
 
-Fallback host for when Fly.io's payment gate isn't worth it. Same image, same
-DB (Neon), same storage (Nhost) — only the compute host differs from
-`fly-deployment.md`.
+Both the API and the frontend run on Render's free tier. Same DB (Neon) and
+storage (Nhost) as `fly-deployment.md` — only the compute host differs.
+`render.yaml` at the repo root is a Blueprint defining both services.
 
 ## Tradeoffs vs Fly
 
@@ -22,37 +22,40 @@ job status, and that inbound traffic keeps the service awake.
 
 1. Push `main` (the Blueprint reads from GitHub).
 2. Render dashboard → **New → Blueprint** → connect `pratikverse/Booktures`.
-   It picks up `render.yaml` at the repo root and creates the `booktures`
-   web service (Docker, free, Singapore).
-3. Open the service → **Environment** and fill the secrets (`sync: false` in
-   the blueprint, so Render prompts for them):
+   It picks up `render.yaml` at the repo root and creates two services:
+   `booktures` (Docker API, free, Singapore) and `booktures-web` (Vite static
+   site, free).
+3. Fill the secrets Render prompts for (`sync: false` in the blueprint):
 
-   | Var | Value |
-   |---|---|
-   | `DATABASE_URL` | Neon pooled string (`...-pooler.<region>.aws.neon.tech/neondb?sslmode=require`) |
-   | `APP_API_KEY` | a strong random string — the frontend sends the same value as `VITE_API_KEY` |
-   | `NHOST_ADMIN_SECRET` | Nhost console → project → Settings → Hasura → Admin Secret |
-   | `GROQ_API_KEY` | Groq console |
-   | `GEMINI_API_KEY` | Google AI Studio |
-   | `CF_ACCOUNT_ID` | Cloudflare dashboard |
-   | `CF_API_TOKEN` | Cloudflare → Workers AI token |
-   | `CORS_ORIGINS` | the deployed frontend origin, e.g. `https://booktures.pages.dev` |
+   | Service | Var | Value |
+   |---|---|---|
+   | booktures | `DATABASE_URL` | Neon pooled string (`...-pooler.<region>.aws.neon.tech/neondb?sslmode=require`) |
+   | booktures | `APP_API_KEY` | a strong random string |
+   | booktures | `NHOST_ADMIN_SECRET` | Nhost console → project → Settings → Hasura → Admin Secret |
+   | booktures | `GROQ_API_KEY` | Groq console |
+   | booktures | `GEMINI_API_KEY` | Google AI Studio |
+   | booktures | `CF_ACCOUNT_ID` | Cloudflare dashboard |
+   | booktures | `CF_API_TOKEN` | Cloudflare → Workers AI token |
+   | booktures-web | `VITE_API_KEY` | **same value** as `APP_API_KEY` above |
 
-   Everything else (providers, models, OCR tuning, Nhost URL/bucket) is baked
-   into `render.yaml`. **Don't set `PORT`** — Render injects it.
-4. Deploy. Render runs `alembic upgrade head` then uvicorn (the Dockerfile CMD).
+   Everything else (providers, models, OCR tuning, Nhost URL/bucket,
+   `CORS_ORIGINS`, `VITE_API_BASE_URL`) is baked into `render.yaml`.
+   **Don't set `PORT`** — Render injects it.
+4. Deploy. The API runs `alembic upgrade head` then uvicorn (Dockerfile CMD);
+   the web service runs `npm ci && npm run build` and serves `frontend/dist`.
 5. Verify:
    ```
    curl https://booktures.onrender.com/health          # {"status":"ok"}
    curl https://booktures.onrender.com/ready            # {"status":"ready"} — real Neon round-trip
    curl -H "X-API-Key: <APP_API_KEY>" https://booktures.onrender.com/books   # 200
    ```
+   Then open `https://booktures-web.onrender.com` and upload a test PDF.
 
-## Frontend
+## If the frontend service gets a different name
 
-- `VITE_API_BASE_URL` → `https://booktures.onrender.com`
-- `VITE_API_KEY` → same as `APP_API_KEY`
-- Then set `CORS_ORIGINS` on Render to the frontend origin and redeploy.
+`CORS_ORIGINS` in `render.yaml` hard-codes `https://booktures-web.onrender.com`.
+If Render assigns a different hostname (name collision), update `CORS_ORIGINS`
+on the `booktures` service to match and redeploy it.
 
 ## Operational notes
 
